@@ -41,7 +41,7 @@ curl -X POST http://localhost:13031/api/v1/token \
 #### Config PAM.d
 
 ```
-echo "auth required pam_2fact.so username=<username> token=<token>" >> cat /etc/pam.d/system-auth
+echo "auth required pam_2fact.so username=<username> token=<token>" >>  /etc/pam.d/system-auth
 ```
 
 
