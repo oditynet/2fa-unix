@@ -2,11 +2,13 @@ package main
 
 import (
     "bufio"
+    "crypto/rand"
     "crypto/sha256"
     "encoding/hex"
     "encoding/json"
     "fmt"
     "log"
+    "net"
     "net/http"
     "os"
     "strings"
@@ -31,10 +33,34 @@ type RegisterRequest struct {
 type RegisterResponse struct {
     Status  string `json:"status"`
     Token   string `json:"token,omitempty"`
+    QRCode  string `json:"qrcode,omitempty"`
     Message string `json:"message,omitempty"`
 }
 
 var usersFile = "/etc/2fact/passwd"
+
+// Временное хранение QR токенов (в памяти)
+var qrTokens = make(map[string]string) // username -> qr_token
+
+func getLocalIP() string {
+    addrs, err := net.InterfaceAddrs()
+    if err != nil {
+        return "localhost"
+    }
+    
+    for _, addr := range addrs {
+        if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
+            return ipnet.IP.String()
+        }
+    }
+    return "localhost"
+}
+
+func generateQRToken() string {
+    bytes := make([]byte, 16)
+    rand.Read(bytes)
+    return hex.EncodeToString(bytes)
+}
 
 func generateToken(username, password string) string {
     h := sha256.New()
@@ -108,17 +134,85 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
     }
 
     token := generateToken(req.Username, req.Password)
+    qrToken := generateQRToken()
+    
+    // Сохраняем QR токен в памяти
+    qrTokens[req.Username] = qrToken
 
     if err := saveUserToken(req.Username, token); err != nil {
         sendJSON(w, http.StatusInternalServerError, RegisterResponse{Status: "error", Message: "Failed to save user"})
         return
     }
 
+    // Генерируем ссылку с автоматическим IP
+    ip := getLocalIP()
+    qrURL := fmt.Sprintf("http://%s:13031/api/v1/verify?token=%s&user=%s", ip, qrToken, req.Username)
+    
     sendJSON(w, http.StatusOK, RegisterResponse{
         Status:  "ok",
         Token:   token,
-        Message: "User registered. Token saved to /etc/2fact/passwd",
+        QRCode:  qrURL,
+        Message: "User registered. Scan QR code or visit URL to verify",
     })
+}
+
+func verifyQRHandler(w http.ResponseWriter, r *http.Request) {
+    qrToken := r.URL.Query().Get("token")
+    username := r.URL.Query().Get("user")
+    
+    if qrToken == "" || username == "" {
+        w.Write([]byte(`
+            <html>
+            <body style="font-family: monospace; padding: 20px;">
+                <h2>2FA Verification</h2>
+                <p>Invalid verification link</p>
+            </body>
+            </html>
+        `))
+        return
+    }
+    
+    // Проверяем существует ли пользователь
+    savedToken, err := getUserToken(username)
+    if err != nil {
+        w.Write([]byte(`
+            <html>
+            <body style="font-family: monospace; padding: 20px;">
+                <h2>2FA Verification</h2>
+                <p style="color: red;">User not found</p>
+            </body>
+            </html>
+        `))
+        return
+    }
+    
+    // Проверяем QR токен из памяти
+    storedQRToken, exists := qrTokens[username]
+    if !exists || storedQRToken != qrToken {
+        w.Write([]byte(`
+            <html>
+            <body style="font-family: monospace; padding: 20px;">
+                <h2>2FA Verification</h2>
+                <p style="color: red;">Invalid or expired verification token</p>
+            </body>
+            </html>
+        `))
+        return
+    }
+    
+    // Удаляем QR токен после успешной верификации
+    delete(qrTokens, username)
+    
+    w.Write([]byte(fmt.Sprintf(`
+        <html>
+        <body style="font-family: monospace; padding: 20px;">
+            <h2>✅ 2FA Verification Successful!</h2>
+            <p>User: <strong>%s</strong></p>
+            <p>Your device has been verified. You can now log in.</p>
+            <p style="font-size: 12px; color: gray;">Close this window and proceed with login.</p>
+        </body>
+        </html>
+    `, username)))
 }
 
 func authHandler(w http.ResponseWriter, r *http.Request) {
@@ -198,8 +292,11 @@ func main() {
     http.HandleFunc("/api/v1/register", registerHandler)
     http.HandleFunc("/api/v1/auth", authHandler)
     http.HandleFunc("/api/v1/token", getTokenHandler)
+    http.HandleFunc("/api/v1/verify", verifyQRHandler)
 
-    log.Println("Server starting on :13031")
-    log.Println("Password file: /etc/2fact/passwd")
+    ip := getLocalIP()
+    log.Printf("Server starting on %s:13031", ip)
+    log.Printf("Password file: %s", usersFile)
+    log.Printf("QR verification URL: http://%s:13031/api/v1/verify?token=<token>&user=<user>", ip)
     log.Fatal(http.ListenAndServe(":13031", nil))
 }
