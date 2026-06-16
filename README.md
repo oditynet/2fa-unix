@@ -67,3 +67,15 @@ session    required                    pam_limits.so
 session    required                    pam_unix.so
 session    optional                    pam_permit.so
 ```
+
+
+# AUR (Arch linux)
+
+https://aur.archlinux.org/cgit/aur.git/tree/2fa-unix.install?h=2fa-unix
+
+Install 
+
+```
+yay -S 2fa-unix
+```
+
